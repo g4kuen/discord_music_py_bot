@@ -16,6 +16,10 @@ load_dotenv()
 token = os.getenv("BOT_TOKEN")
 
 
+ffmpeg_options = {
+    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+    'options': '-vn'
+}
 
 greetings = ["Приветик", "Хай", "Йоу", "Салют", "Хэллоу", "Чё как", "Здарова", "Йо, здарова", "ку"]
 hates = ["Хуйло","Пидагог","Огузок","Хуета","Еблан","Лабуба","Чепушило"]
@@ -61,21 +65,48 @@ def get_audio_url(query):
         return {'title': title, 'url': url}
 
 async def play_next(ctx, channel_id):
-    if queues[channel_id]:
-        song = queues[channel_id].pop(0)
-        track = get_audio_url(song['title'])
-        voice = ctx.guild.voice_client
-        voice.current = track
-        history.append(track)
-        voice.play(discord.FFmpegPCMAudio(track['url']), after=lambda e: asyncio.run_coroutine_threadsafe(play_next(ctx, channel_id), bot.loop))
-        await ctx.send(f"▶️ Играет: {track['title']}")
-    else:
+    if not queues.get(channel_id):
         await ctx.send("Очередь закончилась!")
-        await ctx.guild.voice_client.disconnect()
+        voice = ctx.guild.voice_client
+        if voice:
+            await voice.disconnect()
+        return
+
+    song = queues[channel_id].pop(0)
+    track = get_audio_url(song['title'])
+    if not track or 'url' not in track:
+        await ctx.send(f"❌ Не удалось получить аудио для {song['title']}")
+        await play_next(ctx, channel_id)
+        return
+
+    voice = ctx.guild.voice_client
+    if not voice:
+        await ctx.send("⚠️ Бот не подключён к голосовому каналу!")
+        return
+
+
+
+    source = discord.FFmpegPCMAudio(track['url'], **ffmpeg_options)
+    voice.current = track
+    history.append(track)
+
+    def after_play(err):
+        if err:
+            print(f"Ошибка при проигрывании: {err}")
+        asyncio.run_coroutine_threadsafe(play_next(ctx, channel_id), bot.loop)
+
+    try:
+        voice.play(source, after=after_play)
+        await ctx.send(f"▶️ Играет: {track['title']}")
+    except Exception as e:
+        print(f"Ошибка запуска ffmpeg: {e}")
+        await ctx.send(f"❌ Ошибка при воспроизведении: {track['title']}")
+        await play_next(ctx, channel_id)
 
 @bot.command()
 async def echo(ctx):
     await ctx.send(f"я живой!!")
+
 
 @bot.command()
 async def привет(ctx):

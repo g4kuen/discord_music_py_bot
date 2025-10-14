@@ -1,0 +1,15 @@
+version: "3.8"
+
+services:
+  bot:
+    build: .
+    container_name: venom_bot
+    volumes:
+      - .:/app
+    working_dir: /app
+    command: python bot.py  # запускаем бота напрямую
+    env_file:
+      - .env                # подгружаем токен и прочие переменные
+    environment:
+      - PYTHONUNBUFFERED=1  # чтобы логи шли сразу
+    restart: always
