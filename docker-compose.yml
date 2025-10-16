@@ -7,9 +7,9 @@ services:
     volumes:
       - .:/app
     working_dir: /app
-    command: python bot.py  # запускаем бота напрямую
+    command: python bot.py
     env_file:
-      - .env                # подгружаем токен и прочие переменные
+      - .env
     environment:
-      - PYTHONUNBUFFERED=1  # чтобы логи шли сразу
+      - PYTHONUNBUFFERED=1
     restart: always
