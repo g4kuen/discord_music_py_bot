@@ -47,8 +47,6 @@ def get_audio_url(title):
 
             track = {'title': yt_title, 'url': url}
 
-            history.append(track)
-
             return track
     except Exception as e:
         print(f"Ошибка при получении трека {title}: {e}")

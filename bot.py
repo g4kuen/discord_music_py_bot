@@ -85,7 +85,7 @@ async def play(ctx):
     if not voice.is_playing():
         song = queue.pop(0)
         voice.current = song
-        #history.append(song)
+        history.append(song)
 
         source = discord.FFmpegPCMAudio(song['url'])
         voice.play(
