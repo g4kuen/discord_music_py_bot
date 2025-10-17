@@ -85,7 +85,7 @@ async def play(ctx):
     if not voice.is_playing():
         song = queue.pop(0)
         voice.current = song
-        history.append(song)
+        #history.append(song)
 
         source = discord.FFmpegPCMAudio(song['url'])
         voice.play(
@@ -232,27 +232,38 @@ async def repeat(ctx):
 
     channel_id = ctx.author.voice.channel.id
 
+    if not history:
+        await ctx.send("История пуста.")
+        return
+
     added = []
     for t in history[-10:]:
         add_to_queue(channel_id, t['title'], t['url'])
         added.append(t['title'])
 
-    if added:
-        await ctx.send(f"✅ Добавлено {len(added)} трек(ов) из истории:\n" + "\n".join(added))
-    else:
-        await ctx.send("История пуста.")
+    await ctx.send(
+        f"✅ Добавлено {len(added)} трек(ов) из истории:\n" + "\n".join(added)
+    )
+
 
 @bot.command()
 async def lock(ctx):
-    """Поставить на repeat текущий играющий трек (-skip чтобы возобновить очередь и скипнуть текущий трек)"""
+    """Поставить на repeat текущий играющий трек"""
     voice = ctx.voice_client
     if voice is None or not voice.is_playing():
         await ctx.send("⚠️ Сейчас ничего не играет!")
         return
 
     channel_id = voice.channel.id
+    current_track = getattr(voice, 'current', None)
+
+    if not current_track:
+        await ctx.send("⚠️ Не удалось определить текущий трек!")
+        return
+
     locked_tracks[channel_id] = True
-    await ctx.send("🔒 Текущий трек закреплён. Он будет играть до команды `-skip.`")
+
+    await ctx.send(f"🔒 Трек **{current_track['title']}** закреплён и будет играть в цикле до команды `-skip`.")
 
 
 

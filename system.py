@@ -27,8 +27,10 @@ playlists = {
 
 
 def get_audio_url(title):
-    if title in url_cache:
-        return {'title': title, 'url': url_cache[title]}
+    for track in history:
+        if track['title'].lower() == title.lower():
+            return track
+
 
     ydl_opts = {
         'format': 'bestaudio/best',
@@ -43,9 +45,11 @@ def get_audio_url(title):
             url = info['entries'][0]['url'] if 'entries' in info else info['url']
             yt_title = info['entries'][0]['title'] if 'entries' in info else info['title']
 
-            url_cache[title] = url
+            track = {'title': yt_title, 'url': url}
 
-            return {'title': yt_title, 'url': url}
+            history.append(track)
+
+            return track
     except Exception as e:
         print(f"Ошибка при получении трека {title}: {e}")
         return None
@@ -72,20 +76,21 @@ async def connect_to_voice(ctx):
 
 
 async def play_next(ctx, bot, channel_id):
-    if not queues.get(channel_id):
-        await ctx.send("Очередь закончилась!")
-        voice = ctx.guild.voice_client
-        if voice:
-            await voice.disconnect()
-        return
-
     if locked_tracks.get(channel_id):
         if history:
             song = history[-1]
         else:
             await ctx.send("⚠️ История пуста, нечего повторять!")
             return
+
     else:
+        if not queues.get(channel_id):
+            await ctx.send("Очередь закончилась!")
+            voice = ctx.guild.voice_client
+            if voice:
+                await voice.disconnect()
+            return
+
         song = queues[channel_id].pop(0)
 
     track = get_audio_url(song['title'])
