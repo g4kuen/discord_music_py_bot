@@ -2,10 +2,11 @@ import yt_dlp
 import random
 import discord
 import asyncio
+import os
+
 
 
 ffmpeg_options = {
-    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
     'options': '-vn'
 }
 url_cache = {}
@@ -16,40 +17,82 @@ greetings = ["Приветик", "Хай", "Йоу", "Салют", "Хэллоу
 hates = ["Хуйло","Пидагог","Огузок","Хуета","Еблан","Лабуба","Чепушило"]
 emojis = ["🤖", "👾", "🛸", "🪐", "🦿", "🤯", "👽", "🛰️", ""]
 
-playlists = {
-    1: [
-        "【Ado】ギラギラ",
-        "TVアニメ『ダンダダン』HAYASii「Hunting Soul」【lyric video】",
-        "米津玄師 Kenshi Yonezu - KICKBACK",
-        "米津玄師  Kenshi Yonezu - IRIS OUT",
-    ]
-}
 
+def download_audio(title):
+    import subprocess
+    import json
+    import tempfile
 
-def get_audio_url(title):
+    # ищем в кэше истории
     for track in history:
-        if track['title'].lower() == title.lower():
-            return track
+        if track['title'].lower() == title.lower() and track.get('path'):
+            if os.path.exists(track['path']):
+                return track
 
+    tmpdir = tempfile.gettempdir()
+    outtmpl = os.path.join(tmpdir, '%(id)s.%(ext)s')
 
-    ydl_opts = {
-        'format': 'bestaudio/best',
-        'noplaylist': True,
-        'default_search': 'ytsearch',
-        'quiet': True
-    }
+    cmd = [
+        'yt-dlp',
+        '--js-runtimes', 'node:/usr/bin/node',
+        '--remote-components', 'ejs:github',
+        '--extractor-args', 'youtube:player_client=mweb',
+        '--extractor-args', 'youtubepot-bgutilhttp:base_url=http://bgutil:4416',
+        '-f', 'bestaudio/best',
+        '-x', '--audio-format', 'opus',
+        '-o', outtmpl,
+        '--no-playlist',
+        '--default-search', 'ytsearch1',
+        '--no-update',
+        '--print-json',
+        title,
+    ]
 
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(title, download=False)
-            url = info['entries'][0]['url'] if 'entries' in info else info['url']
-            yt_title = info['entries'][0]['title'] if 'entries' in info else info['title']
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
 
-            track = {'title': yt_title, 'url': url}
+        if result.returncode != 0:
+            print(f"❌ yt-dlp вернул ошибку: {result.stderr.strip()}")
+            return None
 
-            return track
+        # --print-json печатает JSON-инфо на последней строке stdout
+        lines = [line for line in result.stdout.strip().split('\n') if line.strip()]
+        if not lines:
+            print(f"❌ Пустой вывод yt-dlp для: {title}")
+            return None
+
+        info = json.loads(lines[-1])
+        video_id = info.get('id')
+        yt_title = info.get('title') or title
+
+        if not video_id:
+            print(f"❌ Нет id видео для: {title}")
+            return None
+
+        # ищем скачанный .opus, fallback на исходные форматы
+        opus_path = os.path.join(tmpdir, f"{video_id}.opus")
+        if not os.path.exists(opus_path):
+            for ext in ('webm', 'm4a', 'mp3'):
+                p = os.path.join(tmpdir, f"{video_id}.{ext}")
+                if os.path.exists(p):
+                    opus_path = p
+                    break
+            else:
+                print(f"❌ Скачанный файл не найден для: {title}")
+                return None
+
+        return {'title': yt_title, 'path': opus_path, 'id': video_id}
+
+    except subprocess.TimeoutExpired:
+        print(f"⏳ Таймаут скачивания: {title}")
+        return None
     except Exception as e:
-        print(f"Ошибка при получении трека {title}: {e}")
+        print(f"Ошибка при скачивании трека {title}: {e}")
         return None
 
 
@@ -73,14 +116,17 @@ async def connect_to_voice(ctx):
     return voice_client
 
 
-async def play_next(ctx, bot, channel_id):
+async def play_next(ctx, bot, channel_id, depth=0):
+    if depth > 5:
+        await ctx.send("⚠️ Слишком много ошибок подряд, останавливаюсь.")
+        return
+
     if locked_tracks.get(channel_id):
         if history:
             song = history[-1]
         else:
             await ctx.send("⚠️ История пуста, нечего повторять!")
             return
-
     else:
         if not queues.get(channel_id):
             await ctx.send("Очередь закончилась!")
@@ -88,14 +134,13 @@ async def play_next(ctx, bot, channel_id):
             if voice:
                 await voice.disconnect()
             return
-
         song = queues[channel_id].pop(0)
 
-    track = get_audio_url(song['title'])
+    track = await asyncio.to_thread(download_audio, song['title'])
 
-    if not track or 'url' not in track:
-        await ctx.send(f"❌ Не удалось получить аудио для {song['title']}")
-        await play_next(ctx, bot, channel_id)
+    if not track or not track.get('path'):
+        await ctx.send(f"❌ Не удалось скачать аудио для {song['title']}")
+        await play_next(ctx, bot, channel_id, depth + 1)
         return
 
     voice = ctx.guild.voice_client
@@ -103,7 +148,7 @@ async def play_next(ctx, bot, channel_id):
         await ctx.send("⚠️ Бот не подключён к голосовому каналу!")
         return
 
-    source = discord.FFmpegPCMAudio(track['url'], **ffmpeg_options)
+    source = discord.FFmpegPCMAudio(track['path'], **ffmpeg_options)
     voice.current = track
     if not locked_tracks.get(channel_id):
         history.append(track)
@@ -119,7 +164,7 @@ async def play_next(ctx, bot, channel_id):
     except Exception as e:
         print(f"Ошибка запуска ffmpeg: {e}")
         await ctx.send(f"❌ Ошибка при воспроизведении: {track['title']}")
-        await play_next(ctx, bot, channel_id)
+        await play_next(ctx, bot, channel_id, depth + 1)
 
 
 def random_greeting():
@@ -149,29 +194,19 @@ async def add_playlist_to_queue(channel_id, number, filepath="playlists.txt"):
     if channel_id not in queues:
         queues[channel_id] = []
 
-    ydl_opts = {
-        "format": "bestaudio/best",
-        "noplaylist": True,
-        "default_search": "ytsearch",
-        "quiet": True,
-    }
-
     added_tracks = []
 
     async def fetch_track(track):
         try:
-            def _extract():
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    return ydl.extract_info(track, download=False)
+            result = await asyncio.to_thread(download_audio, track)
 
-            info = await asyncio.to_thread(_extract)
-            url = info["entries"][0]["url"] if "entries" in info else info["url"]
-            title = info["entries"][0]["title"] if "entries" in info else info["title"]
+            if not result or not result.get('path'):
+                print(f"❌ Не удалось загрузить трек: {track}")
+                return
 
-            queues[channel_id].append({"title": title, "url": url})
-            added_tracks.append(title)
-
-            print(f"✅ Добавлен трек: {title}")
+            queues[channel_id].append({"title": result["title"], "url": result["path"]})
+            added_tracks.append(result["title"])
+            print(f"✅ Добавлен трек: {result['title']}")
 
         except asyncio.TimeoutError:
             print(f"⏳ Превышено время ожидания для трека: {track}")
@@ -180,7 +215,8 @@ async def add_playlist_to_queue(channel_id, number, filepath="playlists.txt"):
 
     for track in playlists[number]:
         try:
-            await asyncio.wait_for(fetch_track(track), timeout=20)
+            # таймаут больше, потому что теперь трек реально скачивается целиком
+            await asyncio.wait_for(fetch_track(track), timeout=180)
         except asyncio.TimeoutError:
             print(f"⚠️ Таймаут загрузки трека: {track}")
 

@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 from system import (
     random_greeting,
     connect_to_voice,
-    get_audio_url,
+    download_audio,
     add_to_queue,
     get_queue,
     clear_queue,
@@ -15,7 +15,8 @@ from system import (
     add_playlist_to_queue,
     history,
     queues,
-    locked_tracks
+    locked_tracks,
+    ffmpeg_options,
 )
 
 # init
@@ -53,20 +54,25 @@ async def join(ctx):
 
 @bot.command()
 async def list(ctx, *, query):
-    """Добавить трек в очередь"""
     if ctx.author.voice is None:
         await ctx.send("Ты должен быть в голосовом канале!")
         return
 
-    track = get_audio_url(query)
+    await ctx.send(f"🔎 Скачиваю: **{query}**...")
+
+    track = await asyncio.to_thread(download_audio, query)
+
+    if not track or not track.get('path'):
+        await ctx.send(f"❌ Не удалось скачать: **{query}**")
+        return
+
     channel_id = ctx.author.voice.channel.id
-    add_to_queue(channel_id, track['title'], track['url'])
+    add_to_queue(channel_id, track['title'], track['path'])
     await ctx.send(f"✅ Добавлено в очередь: {track['title']}")
 
 
 @bot.command()
 async def play(ctx):
-    """Начать проигрывать очередь"""
     voice = await connect_to_voice(ctx)
     if voice is None:
         return
@@ -74,20 +80,28 @@ async def play(ctx):
     if voice.is_paused():
         voice.resume()
         await ctx.send("▶️ Воспроизведение возобновлено.")
+        return
 
     channel_id = voice.channel.id
     queue = get_queue(channel_id)
 
     if not queue:
-        await ctx.send("Очередь пуста! Добавь треки командой `-list <название>`,а я попробую найти это на ютубе.")
+        await ctx.send("Очередь пуста! Добавь треки командой `-list <название>`.")
         return
 
     if not voice.is_playing():
         song = queue.pop(0)
-        voice.current = song
-        history.append(song)
 
-        source = discord.FFmpegPCMAudio(song['url'])
+        track = await asyncio.to_thread(download_audio, song['title'])
+        if not track or not track.get('path'):
+            await ctx.send(f"❌ Не удалось скачать **{song['title']}**, пропускаю.")
+            await play_next(ctx, bot, channel_id)
+            return
+
+        voice.current = track
+        history.append(track)
+
+        source = discord.FFmpegPCMAudio(track['path'], **ffmpeg_options)
         voice.play(
             source,
             after=lambda e: asyncio.run_coroutine_threadsafe(
@@ -95,7 +109,7 @@ async def play(ctx):
                 bot.loop
             )
         )
-        await ctx.send(f"▶️ Играет: {song['title']}")
+        await ctx.send(f"▶️ Играет: {track['title']}")
     else:
         await ctx.send("🎵 Музыка уже играет!")
 

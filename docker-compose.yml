@@ -2,7 +2,9 @@ version: "3.8"
 
 services:
   bot:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: venom_bot
     volumes:
       - .:/app
@@ -12,4 +14,14 @@ services:
       - .env
     environment:
       - PYTHONUNBUFFERED=1
+      - BGUTIL_PROVIDER_URL=http://bgutil:4416
+    depends_on:
+      - bgutil
+    restart: always
+
+  bgutil:
+    image: brainicism/bgutil-ytdlp-pot-provider:latest
+    container_name: bgutil_provider
+    ports:
+      - "4416:4416"
     restart: always
