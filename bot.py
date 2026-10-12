@@ -1,5 +1,9 @@
 import os
+import random
+import re
 import asyncio
+import unicodedata
+
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
@@ -17,6 +21,13 @@ from system import (
     queues,
     locked_tracks,
     ffmpeg_options,
+    matches,
+    normalize,
+    add_to_history,
+    cleanup_temp_files,
+    get_cache_info,
+    _cleanup_file,
+    _fmt_duration,
 )
 
 # init
@@ -31,6 +42,8 @@ bot = commands.Bot(command_prefix="-", intents=intents)
 @bot.event
 async def on_ready():
     print(f"✅ Бот {bot.user} успешно запущен!")
+    cleanup_temp_files()
+    print("🧹 Кэш /tmp очищен")
 
 
 # commands
@@ -54,6 +67,7 @@ async def join(ctx):
 
 @bot.command()
 async def list(ctx, *, query):
+    """Добавить трек в очередь -list <название видео на ютубе>"""
     if ctx.author.voice is None:
         await ctx.send("Ты должен быть в голосовом канале!")
         return
@@ -67,12 +81,34 @@ async def list(ctx, *, query):
         return
 
     channel_id = ctx.author.voice.channel.id
-    add_to_queue(channel_id, track['title'], track['path'])
-    await ctx.send(f"✅ Добавлено в очередь: {track['title']}")
+    add_to_queue(channel_id, track['title'], track['path'],track.get('duration', 0))
+    dur = _fmt_duration(track.get('duration'))
+    await ctx.send(f"✅ Добавлено в очередь: {track['title']} `{dur}`")
 
 
 @bot.command()
-async def play(ctx):
+async def play(ctx, *, query: str = None):
+    """Запустить очередь. С аргументом — найти трек, добавить в очередь и запустить."""
+    # если передан аргумент — сначала находим и добавляем в очередь
+    if query:
+        if ctx.author.voice is None:
+            await ctx.send("Ты должен быть в голосовом канале!")
+            return
+
+        await ctx.send(f"🔎 Ищу: **{query}**...")
+
+        track = await asyncio.to_thread(download_audio, query)
+
+        if not track or not track.get('path'):
+            await ctx.send(f"❌ Не удалось найти или скачать: **{query}**")
+            return
+
+        channel_id = ctx.author.voice.channel.id
+        add_to_queue(channel_id, track['title'], track['path'],track.get('duration', 0))
+        dur = _fmt_duration(track.get('duration'))
+        await ctx.send(f"✅ Добавлено в очередь: {track['title']} `{dur}`")
+
+    # дальше стандартная логика запуска
     voice = await connect_to_voice(ctx)
     if voice is None:
         return
@@ -86,7 +122,7 @@ async def play(ctx):
     queue = get_queue(channel_id)
 
     if not queue:
-        await ctx.send("Очередь пуста! Добавь треки командой `-list <название>`.")
+        await ctx.send("Очередь пуста! Добавь треки командой `-list <название>` или `-play <название>`.")
         return
 
     if not voice.is_playing():
@@ -99,7 +135,7 @@ async def play(ctx):
             return
 
         voice.current = track
-        history.append(track)
+        add_to_history(track)
 
         source = discord.FFmpegPCMAudio(track['path'], **ffmpeg_options)
         voice.play(
@@ -111,7 +147,7 @@ async def play(ctx):
         )
         await ctx.send(f"▶️ Играет: {track['title']}")
     else:
-        await ctx.send("🎵 Музыка уже играет!")
+        await ctx.send("🎵 Музыка уже играет, трек добавлен в очередь.")
 
 
 @bot.command()
@@ -145,39 +181,104 @@ async def stop(ctx):
 
 @bot.command()
 async def clear(ctx):
-    """Очистить очередь(полностью) и выключить текущий трек """
+    """Очистить очередь, остановить трек и удалить все связанные файлы из кэша"""
     voice = ctx.voice_client
-    if voice:
-        voice.stop()
-        clear_queue(voice.channel.id)
-        await voice.disconnect()
-        await ctx.send("⏹️ Остановлено и очередь очищена.")
-    else:
+    if not voice:
         await ctx.send("Бот не в голосовом канале.")
+        return
+
+    channel_id = voice.channel.id
+    queue = get_queue(channel_id)
+
+    # собираем пути к файлам: текущий играющий + все из очереди
+    paths_to_delete = set()
+
+    current = getattr(voice, 'current', None)
+    if current and current.get('path'):
+        paths_to_delete.add(current['path'])
+
+    for s in queue:
+        p = s.get('url')  # в очереди path хранится под ключом 'url'
+        if p:
+            paths_to_delete.add(p)
+
+    # останавливаем и отключаемся
+    voice.stop()
+    clear_queue(channel_id)
+    await voice.disconnect()
+
+    # чистим файлы
+    deleted = 0
+    for p in paths_to_delete:
+        if os.path.exists(p):
+            try:
+                os.remove(p)
+                deleted += 1
+            except OSError as e:
+                print(f"⚠️ Не удалось удалить {p}: {e}")
+
+    await ctx.send(
+        f"⏹️ Остановлено, очередь очищена.\n"
+        f"🧹 Удалено файлов из кэша: **{deleted}**"
+    )
 
 
 @bot.command()
 async def remove(ctx, *, query):
-    """Удалить трек по названию"""
+    """Удалить треки из очереди по подстроке/номеру (-remove 3, -remove iris out)"""
     if ctx.author.voice is None:
         await ctx.send("Ты должен быть в голосовом канале!")
         return
 
     channel_id = ctx.author.voice.channel.id
     queue = get_queue(channel_id)
-    removed = [s for s in queue if query.lower() in s['title'].lower()]
 
-    if not removed:
-        await ctx.send(f"❌ Треки с названием '{query}' не найдены.")
+    if not queue:
+        await ctx.send("Очередь пуста.")
         return
 
-    queues[channel_id] = [s for s in queue if query.lower() not in s['title'].lower()]
-    await ctx.send(f"🗑️ Удалено {len(removed)} трек(ов) из очереди.")
+    # защищённые пути — те, что есть в истории (их юзает -remember, -repeat)
+    protected_paths = {t.get('path') for t in history if t.get('path')}
+
+    def purge_files(tracks):
+        """Удаляет файлы удаляемых треков, если они не в истории."""
+        for t in tracks:
+            path = t.get('url')  # в очереди path хранится под ключом 'url'
+            if path and path not in protected_paths:
+                _cleanup_file(path)
+
+    # удаление по номеру
+    q = normalize(query)
+    if q.isdigit():
+        idx = int(q) - 1
+        if 0 <= idx < len(queue):
+            removed_track = queue.pop(idx)
+            purge_files([removed_track])
+            await ctx.send(f"🗑️ Удалён трек #{idx + 1}: **{removed_track['title']}**")
+        else:
+            await ctx.send(f"❌ В очереди нет трека с номером {q}.")
+        return
+
+    # поиск (подстрока + fuzzy)
+    removed = [s for s in queue if matches(query, s['title'])]
+
+    if not removed:
+        await ctx.send(f"❌ Треки по запросу **{query}** не найдены.")
+        return
+
+    queues[channel_id] = [s for s in queue if not matches(query, s['title'])]
+    purge_files(removed)
+
+    preview = "\n".join(f"• {t['title']}" for t in removed[:10])
+    if len(removed) > 10:
+        preview += f"\n… и ещё {len(removed) - 10}"
+
+    await ctx.send(f"🗑️ Удалено {len(removed)} трек(ов):\n{preview}")
 
 
 @bot.command()
 async def info(ctx):
-    """Показать текущую очередь/текущий играющий трек"""
+    """Показать текущую очередь и текущий играющий трек"""
     if ctx.author.voice is None:
         await ctx.send("Ты должен быть в голосовом канале!")
         return
@@ -188,16 +289,24 @@ async def info(ctx):
 
     if voice and voice.is_playing():
         now = getattr(voice, "current", None)
-        title = now['title'] if now else "Неизвестно"
-        msg += f"▶️ Сейчас играет: **{title}**\n"
+        if now:
+            dur = _fmt_duration(now.get('duration'))
+            title = now.get('title', 'Неизвестно')
+            msg += f"▶️ Сейчас играет: **{title}** `{dur}`\n"
+        else:
+            msg += "▶️ Сейчас играет: **Неизвестно**\n"
     else:
         msg += "⏹️ Сейчас ничего не играет.\n"
 
     queue = get_queue(channel_id)
     if queue:
-        msg += "\n📃 Очередь:\n" + "\n".join(
-            [f"{i+1}. {song['title']}" for i, song in enumerate(queue)]
-        )
+        total = sum(s.get('duration', 0) for s in queue)
+        lines = [
+            f"`{i:2d}.` {song['title']} `{_fmt_duration(song.get('duration'))}`"
+            for i, song in enumerate(queue, start=1)
+        ]
+        msg += "\n📃 Очередь:\n" + "\n".join(lines)
+        msg += f"\n\n⌛ Всего в очереди: **{_fmt_duration(total)}**"
     else:
         msg += "\nОчередь пуста."
 
@@ -205,7 +314,7 @@ async def info(ctx):
 
 @bot.command()
 async def playlist(ctx, number: int):
-    """Добавить в очередь треки из плейлистов (хардкод в текстовике)"""
+    """Добавить в очередь треки из плейлистов (хардкод в текстовике) playlist 1..2..3"""
     if ctx.author.voice is None:
         await ctx.send("🎧 Ты должен быть в голосовом канале!")
         return
@@ -219,27 +328,48 @@ async def playlist(ctx, number: int):
         await ctx.send(f"❌ Плейлист #{number} не найден или пуст.")
         return
 
+    lines = [
+        f"`{i:2d}.` {t['title']} `{_fmt_duration(t.get('duration'))}`"
+        for i, t in enumerate(added_tracks, start=1)
+    ]
     await ctx.send(
-        f"✅ Добавлено в очередь {len(added_tracks)} трек(ов) из плейлиста #{number}:\n" +
-        "\n".join(f"- {t}" for t in added_tracks)
+        f"✅ Добавлено в очередь {len(added_tracks)} трек(ов) из плейлиста #{number}:\n"
+        + "\n".join(lines)
     )
 
 
 @bot.command()
 async def story(ctx):
-    """Показать последние 10 треков которые играли"""
+    """Показать последние 10 треков из истории"""
     if not history:
         await ctx.send("История пуста.")
         return
 
-    last = history[-10:]
-    text = "\n".join([f"{i+1}. {t['title']}" for i, t in enumerate(last)])
-    await ctx.send("🕘 История последних треков:\n" + text)
+    # берём последние 10 и разворачиваем — свежие сверху
+    last = history[-10:][::-1]
 
+    # что играет сейчас — для пометки
+    voice = ctx.voice_client
+    current = getattr(voice, 'current', None) if voice else None
+    current_path = current.get('path') if current else None
+
+    lines = []
+    for i, t in enumerate(last, start=1):
+        dur = _fmt_duration(t.get('duration'))
+        title = t.get('title', 'Неизвестно')
+        marker = " ▶" if current_path and t.get('path') == current_path else ""
+        lines.append(f"`{i:2d}.` {title} `{dur}`{marker}")
+
+    total = sum(t.get('duration', 0) for t in last)
+
+    text = "🕘 История последних треков:\n" + "\n".join(lines)
+    text += f"\n\n⌛ Общая длительность: **{_fmt_duration(total)}**"
+
+    await ctx.send(text)
 
 @bot.command()
-async def repeat(ctx):
-    """Добавить в очередь последние 10 треков из истории"""
+async def remember(ctx):
+    """Добавить в очередь последние 10 треков из истории (чтобы узнать что добавится -story)"""
     if ctx.author.voice is None:
         await ctx.send("Ты должен быть в голосовом канале!")
         return
@@ -252,17 +382,21 @@ async def repeat(ctx):
 
     added = []
     for t in history[-10:]:
-        add_to_queue(channel_id, t['title'], t['url'])
-        added.append(t['title'])
+        add_to_queue(channel_id, t['title'], t.get('path', ''), t.get('duration', 0))
+        added.append(t)
+
+    lines = [
+        f"`{i:2d}.` {t['title']} `{_fmt_duration(t.get('duration'))}`"
+        for i, t in enumerate(added, start=1)
+    ]
 
     await ctx.send(
-        f"✅ Добавлено {len(added)} трек(ов) из истории:\n" + "\n".join(added)
+        f"✅ Добавлено {len(added)} трек(ов) из истории:\n" + "\n".join(lines)
     )
 
-
 @bot.command()
-async def lock(ctx):
-    """Поставить на repeat текущий играющий трек"""
+async def repeat(ctx):
+    """Поставить на повтор текущий играющий трек"""
     voice = ctx.voice_client
     if voice is None or not voice.is_playing():
         await ctx.send("⚠️ Сейчас ничего не играет!")
@@ -279,6 +413,54 @@ async def lock(ctx):
 
     await ctx.send(f"🔒 Трек **{current_track['title']}** закреплён и будет играть в цикле до команды `-skip`.")
 
+@bot.command()
+async def cache(ctx):
+    """Показать, что сейчас лежит в кэше /tmp"""
 
+    files = get_cache_info()
+
+    if not files:
+        await ctx.send("📦 Кэш пуст.")
+        return
+
+    total_mb = sum(f[1] for f in files)
+
+    lines = []
+    for name, size_mb, _ in files[:20]:
+        lines.append(f"`{size_mb:5.2f} MB` — {name}")
+
+    text = f"📦 Кэш: **{len(files)}** файл(ов), всего **{total_mb:.2f} MB**\n"
+    text += "\n".join(lines)
+
+    if len(files) > 20:
+        text += f"\n… и ещё {len(files) - 20}"
+
+    await ctx.send(text)
+
+
+@bot.command()
+async def shuffle(ctx):
+    """Перемешать треки в очереди"""
+    if ctx.author.voice is None:
+        await ctx.send("Ты должен быть в голосовом канале!")
+        return
+
+    channel_id = ctx.author.voice.channel.id
+    queue = get_queue(channel_id)
+
+    if not queue:
+        await ctx.send("Очередь пуста, нечего перемешивать.")
+        return
+
+    if len(queue) < 2:
+        await ctx.send("В очереди меньше двух треков, перемешивать нечего.")
+        return
+
+    random.shuffle(queue)
+    # queues[channel_id] и queue — один и тот же список, shuffle меняет in-place,
+    # так что отдельно перезаписывать не надо, но для явности можно:
+    queues[channel_id] = queue
+
+    await ctx.send(f"🔀 Перемешано **{len(queue)}** трек(ов) в очереди.")
 
 bot.run(token)
