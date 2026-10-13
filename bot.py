@@ -3,6 +3,9 @@ import random
 import re
 import asyncio
 import unicodedata
+#числовое значение прав discord 3263488
+#292208042496
+
 
 import discord
 from discord.ext import commands
@@ -88,7 +91,7 @@ async def list(ctx, *, query):
 
 @bot.command()
 async def play(ctx, *, query: str = None):
-    """Запустить очередь. С аргументом — найти трек, добавить в очередь и запустить."""
+    """Запустить очередь. С аргументом — дополнительно добавить в очередь"""
     # если передан аргумент — сначала находим и добавляем в очередь
     if query:
         if ctx.author.voice is None:
@@ -225,7 +228,7 @@ async def clear(ctx):
 
 @bot.command()
 async def remove(ctx, *, query):
-    """Удалить треки из очереди по подстроке/номеру (-remove 3, -remove iris out)"""
+    """Удалить треки из очереди по подстроке/номеру из -info"""
     if ctx.author.voice is None:
         await ctx.send("Ты должен быть в голосовом канале!")
         return
@@ -314,7 +317,7 @@ async def info(ctx):
 
 @bot.command()
 async def playlist(ctx, number: int):
-    """Добавить в очередь треки из плейлистов (хардкод в текстовике) playlist 1..2..3"""
+    """Добавить в очередь треки из текстовика -playlist <1..2..3>"""
     if ctx.author.voice is None:
         await ctx.send("🎧 Ты должен быть в голосовом канале!")
         return
@@ -369,7 +372,7 @@ async def story(ctx):
 
 @bot.command()
 async def remember(ctx):
-    """Добавить в очередь последние 10 треков из истории (чтобы узнать что добавится -story)"""
+    """Добавить в очередь последние 10 треков из -story"""
     if ctx.author.voice is None:
         await ctx.send("Ты должен быть в голосовом канале!")
         return
@@ -462,5 +465,45 @@ async def shuffle(ctx):
     queues[channel_id] = queue
 
     await ctx.send(f"🔀 Перемешано **{len(queue)}** трек(ов) в очереди.")
+
+@bot.command()
+async def jump(ctx, index: int):
+    """Перепрыгнуть на трек из очереди по номеру. Текущий трек скипается (-info показывает номера)."""
+    if ctx.author.voice is None:
+        await ctx.send("Ты должен быть в голосовом канале!")
+        return
+
+    voice = ctx.voice_client
+    if not voice:
+        await ctx.send("Бот не в голосовом канале.")
+        return
+
+    channel_id = voice.channel.id
+    queue = get_queue(channel_id)
+
+    if not queue:
+        await ctx.send("Очередь пуста.")
+        return
+
+    if index < 1 or index > len(queue):
+        await ctx.send(f"❌ Укажи номер от 1 до {len(queue)} (см. `-info`).")
+        return
+
+    # забираем выбранный трек и ставим его в начало очереди
+    chosen = queue.pop(index - 1)
+    queue.insert(0, chosen)
+    queues[channel_id] = queue
+
+    # снимаем lock, как при skip — иначе play_next снова запустит историю
+    locked_tracks[channel_id] = False
+
+    if voice.is_playing() or voice.is_paused():
+        # stop() дёрнет after_play → play_next → сыграет queue[0]
+        voice.stop()
+    else:
+        # ничего не играет — запускаем воспроизведение вручную
+        await play_next(ctx, bot, channel_id)
+
+    await ctx.send(f"⏭️ Прыжок на #{index}: **{chosen['title']}**")
 
 bot.run(token)
