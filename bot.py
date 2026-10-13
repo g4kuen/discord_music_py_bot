@@ -3,9 +3,6 @@ import random
 import re
 import asyncio
 import unicodedata
-#числовое значение прав discord 3263488
-#292208042496
-
 
 import discord
 from discord.ext import commands
