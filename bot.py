@@ -463,7 +463,7 @@ async def shuffle(ctx):
 
     await ctx.send(f"🔀 Перемешано **{len(queue)}** трек(ов) в очереди.")
 
-@bot.command(aliases=['j'])
+@bot.command()
 async def jump(ctx, index: int):
     """Перепрыгнуть на трек из очереди по номеру. Текущий трек скипается (-info показывает номера)."""
     if ctx.author.voice is None:
@@ -503,5 +503,58 @@ async def jump(ctx, index: int):
 
     dur = _fmt_duration(chosen.get('duration'))
     await ctx.send(f"⏭️ Прыжок на #{index}: **{chosen['title']}** `{dur}`")
+
+
+@bot.command()
+async def previous(ctx):
+    """Вернуться к предыдущему треку. Текущий уходит в очередь первым."""
+    if ctx.author.voice is None:
+        await ctx.send("Ты должен быть в голосовом канале!")
+        return
+
+    voice = ctx.voice_client
+    if not voice:
+        await ctx.send("Бот не в голосовом канале.")
+        return
+
+    if not history:
+        await ctx.send("История пуста.")
+        return
+
+    channel_id = voice.channel.id
+    current = getattr(voice, 'current', None)
+    current_key = (current.get('path') or current.get('title')) if current else None
+
+    # идём с конца истории, пропуская всё, что совпадает с текущим
+    # (актуально для -repeat, когда трек лежит в истории несколько раз)
+    prev_track = None
+    for t in reversed(history):
+        key = t.get('path') or t.get('title')
+        if key and key != current_key:
+            prev_track = t
+            break
+
+    if not prev_track:
+        await ctx.send("❌ В истории нет предыдущего трека.")
+        return
+
+    # собираем очередь: [prev, current, ...остальное]
+    queue = get_queue(channel_id)
+    new_queue = [prev_track]
+    if current:
+        new_queue.append(current)
+    new_queue.extend(queue)
+    queues[channel_id] = new_queue
+
+    # снимаем lock — иначе play_next вернётся к истории вместо очереди
+    locked_tracks[channel_id] = False
+
+    if voice.is_playing() or voice.is_paused():
+        voice.stop()
+    else:
+        await play_next(ctx, bot, channel_id)
+
+    dur = _fmt_duration(prev_track.get('duration'))
+    await ctx.send(f"⏮️ Возврат к: **{prev_track['title']}** `{dur}`")
 
 bot.run(token)
