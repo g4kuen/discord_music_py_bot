@@ -463,7 +463,7 @@ async def shuffle(ctx):
 
     await ctx.send(f"🔀 Перемешано **{len(queue)}** трек(ов) в очереди.")
 
-@bot.command()
+@bot.command(aliases=['j'])
 async def jump(ctx, index: int):
     """Перепрыгнуть на трек из очереди по номеру. Текущий трек скипается (-info показывает номера)."""
     if ctx.author.voice is None:
@@ -501,6 +501,7 @@ async def jump(ctx, index: int):
         # ничего не играет — запускаем воспроизведение вручную
         await play_next(ctx, bot, channel_id)
 
-    await ctx.send(f"⏭️ Прыжок на #{index}: **{chosen['title']}**")
+    dur = _fmt_duration(chosen.get('duration'))
+    await ctx.send(f"⏭️ Прыжок на #{index}: **{chosen['title']}** `{dur}`")
 
 bot.run(token)
