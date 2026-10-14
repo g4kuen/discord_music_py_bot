@@ -150,12 +150,12 @@ async def connect_to_voice(ctx):
 
     if voice_client is None:
         voice_client = await channel.connect()
-        await ctx.send(f"✅ Подключился к каналу: **{channel.name}**")
+        #await ctx.send(f"✅ Подключился к каналу: **{channel.name}**")
     elif voice_client.channel != channel:
         await voice_client.move_to(channel)
-        await ctx.send(f"🔁 Переместился в канал: **{channel.name}**")
+        #await ctx.send(f"🔁 Переместился в канал: **{channel.name}**")
     else:
-        await ctx.send(f"🎧 Уже подключён к каналу: **{channel.name}**")
+        #await ctx.send(f"🎧 Уже подключён к каналу: **{channel.name}**")
 
     return voice_client
 
@@ -670,6 +670,17 @@ class QueueSelect(discord.ui.Select):
             return
 
         chosen = queue.pop(idx - 1)
+
+        # возвращаем текущий трек на место выбранного (свап)
+        current = getattr(v, 'current', None)
+        if current and current.get('path'):
+            queue.insert(idx - 1, {
+                'title': current['title'],
+                'url': current['path'],
+                'duration': current.get('duration', 0),
+            })
+
+        # выбранный — в начало
         queue.insert(0, chosen)
         queues[ch] = queue
 

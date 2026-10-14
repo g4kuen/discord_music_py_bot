@@ -520,9 +520,9 @@ async def previous(ctx):
         await ctx.send("Ты должен быть в голосовом канале!")
         return
 
-    voice = ctx.voice_client
-    if not voice:
-        await ctx.send("Бот не в голосовом канале.")
+    # подключаемся/переезжаем (с сообщениями из connect_to_voice)
+    voice = await connect_to_voice(ctx)
+    if voice is None:
         return
 
     if not history:
@@ -558,7 +558,7 @@ async def previous(ctx):
     locked_tracks[channel_id] = False
 
     if voice.is_playing() or voice.is_paused():
-        voice.stop()
+        voice.stop()  # → after_play → play_next (сыграет prev_track)
     else:
         await play_next(ctx, bot, channel_id)
 
