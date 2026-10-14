@@ -150,12 +150,12 @@ async def connect_to_voice(ctx):
 
     if voice_client is None:
         voice_client = await channel.connect()
-        #await ctx.send(f"✅ Подключился к каналу: **{channel.name}**")
+        await ctx.send(f"✅ Подключился к каналу: **{channel.name}**")
     elif voice_client.channel != channel:
         await voice_client.move_to(channel)
-        #await ctx.send(f"🔁 Переместился в канал: **{channel.name}**")
+        await ctx.send(f"🔁 Переместился в канал: **{channel.name}**")
     else:
-        #await ctx.send(f"🎧 Уже подключён к каналу: **{channel.name}**")
+        await ctx.send(f"🎧 Уже подключён к каналу: **{channel.name}**")
 
     return voice_client
 
