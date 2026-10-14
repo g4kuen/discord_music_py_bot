@@ -2,6 +2,8 @@ import os
 import random
 import re
 import asyncio
+import tempfile
+
 import unicodedata
 
 import discord
@@ -28,6 +30,19 @@ from system import (
     get_cache_info,
     _cleanup_file,
     _fmt_duration,
+    get_volume,
+    set_volume,
+    MIN_VOLUME,
+    MAX_VOLUME,
+    DEFAULT_VOLUME,
+    stop_np,
+    start_np,
+    refresh_np,
+    get_position,
+    mark_paused,
+    mark_resumed,
+    _progress_bar, _parse_time,
+
 )
 
 # init
@@ -126,26 +141,7 @@ async def play(ctx, *, query: str = None):
         return
 
     if not voice.is_playing():
-        song = queue.pop(0)
-
-        track = await asyncio.to_thread(download_audio, song['title'])
-        if not track or not track.get('path'):
-            await ctx.send(f"❌ Не удалось скачать **{song['title']}**, пропускаю.")
-            await play_next(ctx, bot, channel_id)
-            return
-
-        voice.current = track
-        add_to_history(track)
-
-        source = discord.FFmpegPCMAudio(track['path'], **ffmpeg_options)
-        voice.play(
-            source,
-            after=lambda e: asyncio.run_coroutine_threadsafe(
-                play_next(ctx, bot, channel_id),
-                bot.loop
-            )
-        )
-        await ctx.send(f"▶️ Играет: {track['title']}")
+        await play_next(ctx, bot, channel_id)
     else:
         await ctx.send("🎵 Музыка уже играет, трек добавлен в очередь.")
 
@@ -162,65 +158,77 @@ async def skip(ctx):
     else:
         await ctx.send("Сейчас ничего не играет.")
 
-
 @bot.command()
-async def stop(ctx):
-    """Стоп трека (-play чтобы продолжить воспроизведение) """
+async def clear(ctx, mode: str = None):
+    """-clear — очистить очередь и остановить трек.
+    -clear all — дополнительно снести историю и весь кэш."""
+    wipe_all = (mode or "").strip().lower() in ("all", "всё", "все", "full")
+
     voice = ctx.voice_client
-    if not voice:
-        await ctx.send("⚠️ Бот не в голосовом канале.")
-        return
-
-    if voice.is_playing():
-        voice.pause()
-        await ctx.send("⏸️ Воспроизведение приостановлено.")
-    else:
-        await ctx.send("Сейчас ничего не играет.")
-
-
-
-@bot.command()
-async def clear(ctx):
-    """Очистить очередь, остановить трек и удалить все связанные файлы из кэша"""
-    voice = ctx.voice_client
-    if not voice:
-        await ctx.send("Бот не в голосовом канале.")
-        return
-
-    channel_id = voice.channel.id
-    queue = get_queue(channel_id)
-
-    # собираем пути к файлам: текущий играющий + все из очереди
+    channel_id = None
     paths_to_delete = set()
 
-    current = getattr(voice, 'current', None)
-    if current and current.get('path'):
-        paths_to_delete.add(current['path'])
+    if voice:
+        channel_id = voice.channel.id
+        queue = get_queue(channel_id)
 
-    for s in queue:
-        p = s.get('url')  # в очереди path хранится под ключом 'url'
-        if p:
-            paths_to_delete.add(p)
+        # текущий трек
+        current = getattr(voice, 'current', None)
+        if current and current.get('path'):
+            paths_to_delete.add(current['path'])
 
-    # останавливаем и отключаемся
-    voice.stop()
-    clear_queue(channel_id)
-    await voice.disconnect()
+        # очередь (path лежит под ключом 'url')
+        for s in queue:
+            p = s.get('url')
+            if p:
+                paths_to_delete.add(p)
 
-    # чистим файлы
+        voice.stop()
+        clear_queue(channel_id)
+        await stop_np(voice)
+        await voice.disconnect()
+    else:
+        if ctx.author.voice:
+            channel_id = ctx.author.voice.channel.id
+            clear_queue(channel_id)
+
+    # режим "all" — тянем ещё историю и весь кэш
+    if wipe_all:
+        for t in history:
+            if t.get('path'):
+                paths_to_delete.add(t['path'])
+
+        # добавляем всё, что лежит в /tmp (на случай «осиротевших» файлов)
+        for name, _, _ in get_cache_info():
+            paths_to_delete.add(os.path.join(tempfile.gettempdir(), name))
+
+    # удаляем
     deleted = 0
+    freed_mb = 0.0
     for p in paths_to_delete:
-        if os.path.exists(p):
+        if p and os.path.exists(p):
             try:
+                size_mb = os.path.getsize(p) / (1024 * 1024)
                 os.remove(p)
                 deleted += 1
+                freed_mb += size_mb
             except OSError as e:
                 print(f"⚠️ Не удалось удалить {p}: {e}")
 
-    await ctx.send(
-        f"⏹️ Остановлено, очередь очищена.\n"
-        f"🧹 Удалено файлов из кэша: **{deleted}**"
-    )
+    if wipe_all:
+        history.clear()
+
+    if wipe_all:
+        await ctx.send(
+            f"⏹️ Остановлено. Очередь, история и весь кэш очищены.\n"
+            f"🧹 Удалено файлов: **{deleted}**, освобождено **{freed_mb:.2f} MB**"
+        )
+    else:
+        await ctx.send(
+            f"⏹️ Остановлено, очередь очищена.\n"
+            f"🧹 Удалено файлов из кэша: **{deleted}**\n"
+            f"_История и остальные файлы в кэше не тронуты. Для полной очистки: `-clear all`._"
+        )
 
 
 @bot.command()
@@ -556,5 +564,151 @@ async def previous(ctx):
 
     dur = _fmt_duration(prev_track.get('duration'))
     await ctx.send(f"⏮️ Возврат к: **{prev_track['title']}** `{dur}`")
+
+@bot.command(name="volume", aliases=["vol"])
+async def volume(ctx, value: str = None):
+    """Громкость 0–200%. Без аргумента — показать текущую.
+    Можно: -volume 80 | -volume up | -volume down | -volume reset
+    """
+    voice = ctx.voice_client
+    if not voice or not voice.channel:
+        await ctx.send("⚠️ Бот не в голосовом канале.")
+        return
+
+    channel_id = voice.channel.id
+    cur = get_volume(channel_id)
+
+    # без аргумента — показываем текущую
+    if value is None:
+        await ctx.send(f"🔊 Текущая громкость: **{int(cur * 100)}%**")
+        return
+
+    v = value.strip().lower()
+
+    # пресеты
+    if v in ("up", "+", "громче"):
+        new = cur + 0.1
+    elif v in ("down", "-", "тише"):
+        new = cur - 0.1
+    elif v in ("reset", "default", "сброс"):
+        new = DEFAULT_VOLUME
+    elif v in ("max", "макс"):
+        new = MAX_VOLUME
+    elif v in ("mute", "мут", "0"):
+        new = 0.0
+    else:
+        # пробуем как число
+        try:
+            num = int(v.rstrip("%"))
+        except ValueError:
+            await ctx.send(
+                "❌ Используй: `-volume 0..200`, `up`, `down`, `reset`, `max`, `mute`."
+            )
+            return
+        new = num / 100
+
+    vol = set_volume(channel_id, new)
+
+    # применяем к текущему источнику, если он уже обёрнут
+    src = getattr(voice, "source", None)
+    if isinstance(src, discord.PCMVolumeTransformer):
+        src.volume = vol
+        await ctx.send(f"🔊 Громкость: **{int(vol * 100)}%**")
+    else:
+        await ctx.send(
+            f"🔊 Громкость сохранена (**{int(vol * 100)}%**), "
+            f"применится к следующему треку."
+        )
+
+@bot.command()
+async def seek(ctx, position: str):
+    """Перемотка: -seek 1:30 | -seek 90 | -seek 1:02:30 | -seek begin | -seek end"""
+    voice = ctx.voice_client
+    if not voice or (not voice.is_playing() and not voice.is_paused()):
+        await ctx.send("⚠️ Сейчас ничего не играет.")
+        return
+
+    current = getattr(voice, 'current', None)
+    if not current:
+        await ctx.send("⚠️ Не удалось определить текущий трек.")
+        return
+
+    p = position.strip().lower()
+    duration = current.get('duration') or 0
+
+    # подфункции-шорткаты
+    if p in ("begin", "start", "начало", "сначала"):
+        seconds = 0
+    elif p in ("end", "конец", "конца", "finish"):
+        if not duration:
+            await ctx.send("⚠️ Длительность трека неизвестна — не могу прыгнуть в конец.")
+            return
+        seconds = max(0, duration - 2)  # за 2 сек до конца, чтобы after_play успел
+    else:
+        seconds = _parse_time(p)
+        if seconds is None or seconds < 0:
+            await ctx.send(
+                "❌ Формат: `-seek 1:30` / `-seek 90` / `-seek 1:02:30` / "
+                "`-seek begin` / `-seek end`."
+            )
+            return
+        if duration and seconds >= duration:
+            await ctx.send(
+                f"❌ Трек длится `{_fmt_duration(duration)}`, "
+                f"а ты просишь `{_fmt_duration(seconds)}`. "
+                f"Для конца используй `-seek end`."
+            )
+            return
+
+    channel_id = voice.channel.id
+    locked_tracks[channel_id] = False  # снимаем loop, иначе seek зациклится
+
+    voice.seek_to = seconds
+    voice.stop()  # → after_play → play_next увидит seek_to
+
+    # красивое сообщение
+    if seconds == 0:
+        pos_str = "начало"
+    elif p in ("end", "конец", "конца", "finish"):
+        pos_str = f"конец (`{_fmt_duration(seconds)}`)"
+    else:
+        pos_str = _fmt_duration(seconds)
+
+    await ctx.send(f"⏩ Перемотка на {pos_str}")
+
+@bot.command(name="pause", aliases=["stop"])
+async def pause(ctx):
+    """Поставить на паузу"""
+    voice = ctx.voice_client
+    if not voice or not voice.is_playing():
+        await ctx.send("⚠️ Сейчас ничего не играет.")
+        return
+    voice.pause()
+    mark_paused(voice)
+    await refresh_np(voice)
+    await ctx.send("⏸️ Пауза.")
+
+
+@bot.command(name="resume", aliases=["rs", "unpause"])
+async def resume(ctx):
+    """Продолжить воспроизведение"""
+    voice = ctx.voice_client
+    if not voice or not voice.is_paused():
+        await ctx.send("⚠️ Сейчас ничего не на паузе.")
+        return
+    voice.resume()
+    mark_resumed(voice)
+    await refresh_np(voice)
+    await ctx.send("▶️ Продолжаю.")
+
+
+@bot.command(name="np", aliases=["nowplaying", "сейчас"])
+async def nowplaying(ctx):
+    """Что играет сейчас + прогресс"""
+    voice = ctx.voice_client
+    if not voice or not voice.is_playing():
+        await ctx.send("⏹️ Сейчас ничего не играет.")
+        return
+
 
 bot.run(token)
