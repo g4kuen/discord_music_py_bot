@@ -818,26 +818,26 @@ class PlayerControls(discord.ui.View):
                 "⚠️ Ничего не играет.", ephemeral=True
             )
 
-        @discord.ui.button(emoji="📃", label="Очередь", style=discord.ButtonStyle.secondary, row=1)
-        async def queue_btn(self, interaction, button):
-            if not await self._guard(interaction):
-                return
+    @discord.ui.button(emoji="📃", label="Очередь", style=discord.ButtonStyle.secondary, row=1)
+    async def queue_btn(self, interaction, button):
+        if not await self._guard(interaction):
+            return
 
-            v = self.voice
-            ch = v.channel.id
-            queue = queues.get(ch, [])
+        v = self.voice
+        ch = v.channel.id
+        queue = queues.get(ch, [])
 
-            if not queue:
-                await interaction.response.send_message(
-                    "📭 Очередь пуста — некуда прыгать.", ephemeral=True
-                )
-                return
-
-            view = QueueView(v, ch)
-            extra = "" if len(queue) <= 25 else f"\n_(показаны первые 25 из {len(queue)})_"
+        if not queue:
             await interaction.response.send_message(
-                "📃 Куда прыгнуть?" + extra,
-                view=view,
-                ephemeral=True,
+                "📭 Очередь пуста — некуда прыгать.", ephemeral=True
             )
+            return
+
+        view = QueueView(v, ch)
+        extra = "" if len(queue) <= 25 else f"\n_(показаны первые 25 из {len(queue)})_"
+        await interaction.response.send_message(
+            "📃 Куда прыгнуть?" + extra,
+            view=view,
+            ephemeral=True,
+        )
 
