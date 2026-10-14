@@ -594,6 +594,40 @@ async def refresh_np(voice):
     except Exception as e:
         print(f"⚠️ np refresh: {e}")
 
+async def repost_np(ctx, voice):
+    """Пересоздать NP-сообщение внизу чата (для -np).
+    Удаляет старое, шлёт новое с текущей позицией, перезапускает автообновление."""
+    current = getattr(voice, 'current', None)
+    if not current:
+        return None
+
+    # запоминаем старое, потом stop_np обнуляет все атрибуты
+    old = getattr(voice, 'np_message', None)
+    await stop_np(voice)
+
+    if old:
+        try:
+            await old.delete()
+        except Exception:
+            pass
+
+    pos = get_position(voice)
+    dur = current.get('duration') or 0
+    paused = bool(getattr(voice, 'paused_at', None))
+    text = _build_np_text(current, pos, dur, paused)
+
+    try:
+        view = PlayerControls(voice)
+    except NameError:
+        view = None
+
+    msg = await ctx.send(text, view=view)
+
+    voice.np_message = msg
+    voice._np_last_text = text
+    voice.np_task = asyncio.create_task(_np_loop(voice))
+    return msg
+
 # ─── интерактивное NP ──────────────────────────────────────────
 
 class SeekModal(discord.ui.Modal, title="Перейти к позиции"):
@@ -631,6 +665,7 @@ class SeekModal(discord.ui.Modal, title="Перейти к позиции"):
         await interaction.response.send_message(
             f"⏩ Перемотка на `{label}`", ephemeral=True
         )
+
 class QueueSelect(discord.ui.Select):
     """Выпадашка с треками очереди. До 25 штук, дальше — пока не влезет."""
 

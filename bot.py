@@ -41,7 +41,9 @@ from system import (
     get_position,
     mark_paused,
     mark_resumed,
-    _progress_bar, _parse_time,
+    _progress_bar,
+    _parse_time,
+    repost_np,
 
 )
 
@@ -704,11 +706,15 @@ async def resume(ctx):
 
 @bot.command(name="np", aliases=["nowplaying", "сейчас"])
 async def nowplaying(ctx):
-    """Что играет сейчас + прогресс"""
+    """Показать что играет — пересоздаёт живое сообщение внизу чата"""
     voice = ctx.voice_client
-    if not voice or not voice.is_playing():
+    if not voice:
+        await ctx.send("⚠️ Бот не в голосовом канале.")
+        return
+
+    current = getattr(voice, 'current', None)
+    if not current or (not voice.is_playing() and not voice.is_paused()):
         await ctx.send("⏹️ Сейчас ничего не играет.")
         return
 
-
-bot.run(token)
+    await repost_np(ctx, voice)
