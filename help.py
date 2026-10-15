@@ -12,14 +12,15 @@ CATEGORIES = {
         "seek", "volume", "repeat", "shuffle", "np",
     ],
     "📃 Очередь и история": [
-        "list", "info", "remove", "clear", "story", "remember",
-        "playlist", "cache",
+        "list", "info", "remove", "clear", "story", "remember", "cache",
+    ],
+    "💾 Плейлисты": [
+        "addplaylist", "showplaylist", "playlist",
     ],
     "🔧 Утилиты": [
         "join", "echo", "привет",
     ],
 }
-
 
 def _fmt_command(cmd: commands.Command) -> str:
     """`-name <args>` — короткое описание из docstring."""

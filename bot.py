@@ -11,6 +11,7 @@ from discord.ext import commands
 from dotenv import load_dotenv
 
 from help import MusicHelp
+import playlists as pl
 
 from system import (
     random_greeting,
@@ -328,30 +329,160 @@ async def info(ctx):
 
     await ctx.send(msg)
 
-@bot.command()
-async def playlist(ctx, number: int):
-    """Добавить в очередь треки из текстовика -playlist <1..2..3>"""
+@bot.command(name="playlist", aliases=["pl"])
+async def playlist(ctx, *, name: str):
+    """Загрузить плейлист по имени и запустить.
+    Использование: -playlist <название>"""
     if ctx.author.voice is None:
         await ctx.send("🎧 Ты должен быть в голосовом канале!")
         return
 
-    channel_id = ctx.author.voice.channel.id
-    await ctx.send(f"⏳ Загружаю плейлист #{number}...")
-
-    added_tracks = await add_playlist_to_queue(channel_id, number)
-
-    if not added_tracks:
-        await ctx.send(f"❌ Плейлист #{number} не найден или пуст.")
+    pl_data = pl.load(name)
+    if not pl_data:
+        await ctx.send(
+            f"❌ Плейлист **{name}** не найден.\n"
+            f"_Посмотреть все: `-showplaylist`_"
+        )
         return
 
-    lines = [
-        f"`{i:2d}.` {t['title']} `{_fmt_duration(t.get('duration'))}`"
-        for i, t in enumerate(added_tracks, start=1)
-    ]
+    tracks = pl.to_tracks(pl_data)
+    if not tracks:
+        await ctx.send(f"❌ Плейлист **{pl_data['name']}** пуст.")
+        return
+
+    channel_id = ctx.author.voice.channel.id
     await ctx.send(
-        f"✅ Добавлено в очередь {len(added_tracks)} трек(ов) из плейлиста #{number}:\n"
-        + "\n".join(lines)
+        f"⏳ Загружаю **{pl_data['name']}** ({len(tracks)} трек(ов))..."
     )
+
+    # скачиваем и добавляем в очередь
+    added = []
+    for t in tracks:
+        result = await asyncio.to_thread(download_audio, t["title"])
+        if not result or not result.get("path"):
+            print(f"❌ playlist: не удалось скачать {t['title']}")
+            continue
+        add_to_queue(
+            channel_id,
+            result["title"],
+            result["path"],
+            result.get("duration", 0),
+        )
+        added.append(result)
+
+    if not added:
+        await ctx.send(f"❌ Не удалось загрузить ни одного трека из **{pl_data['name']}**.")
+        return
+
+    total = sum(r.get("duration", 0) for r in added)
+    preview = "\n".join(
+        f"`{i:2d}.` {r['title']} `{_fmt_duration(r.get('duration'))}`"
+        for i, r in enumerate(added[:10], start=1)
+    )
+    if len(added) > 10:
+        preview += f"\n_…и ещё {len(added) - 10}._"
+
+    await ctx.send(
+        f"📥 Загружено **{len(added)}** трек(ов) из **{pl_data['name']}**, "
+        f"`{_fmt_duration(total)}`:\n{preview}"
+    )
+
+    # запускаем, если ничего не играет
+    voice = await connect_to_voice(ctx)
+    if voice is None:
+        return
+
+    if voice.is_paused():
+        voice.resume()
+        mark_resumed(voice)
+        await refresh_np(voice)
+        await ctx.send("▶️ Воспроизведение возобновлено.")
+        return
+
+    if not voice.is_playing():
+        await play_next(ctx, bot, channel_id)
+    else:
+        await ctx.send("🎵 Музыка уже играет, плейлист добавлен в очередь.")
+
+@bot.command(name="addplaylist", aliases=["ap", "plsave"])
+async def addplaylist(ctx, *, name: str):
+    """Сохранить текущую очередь (+ играющий трек) как плейлист.
+    Использование: -addplaylist <название>"""
+    if ctx.author.voice is None:
+        await ctx.send("Ты должен быть в голосовом канале!")
+        return
+
+    channel_id = ctx.author.voice.channel.id
+    queue = get_queue(channel_id)
+    voice = ctx.voice_client
+    current = getattr(voice, "current", None) if voice else None
+
+    tracks = []
+    if current and current.get("title"):
+        tracks.append({
+            "title": current["title"],
+            "duration": current.get("duration", 0),
+        })
+    for t in queue:
+        if t.get("title"):
+            tracks.append({
+                "title": t["title"],
+                "duration": t.get("duration", 0),
+            })
+
+    if not tracks:
+        await ctx.send("❌ Нечего сохранять — очередь пуста и ничего не играет.")
+        return
+
+    ok, was_update = pl.save(name, tracks, ctx.author.id, str(ctx.author))
+    if not ok:
+        await ctx.send(f"❌ Не удалось сохранить **{name}** (проверь имя).")
+        return
+
+    total = sum(t["duration"] for t in tracks)
+    prefix = "♻️ Перезаписан" if was_update else "💾 Сохранён"
+    await ctx.send(
+        f"{prefix} плейлист **{name}** — {len(tracks)} трек(ов), "
+        f"`{_fmt_duration(total)}`"
+    )
+
+
+@bot.command(name="showplaylist", aliases=["sp", "pls"])
+async def showplaylist(ctx, *, query: str = None):
+    """Найти плейлисты по подстроке. Без аргумента — все.
+    Использование: -showplaylist <текст>"""
+    results, total = pl.search(query or "", limit=10)
+
+    if not results:
+        if query:
+            await ctx.send(f"🔍 Плейлисты по запросу **{query}** не найдены.")
+        else:
+            await ctx.send(
+                "📭 Плейлистов пока нет. Сохрани первый: "
+                "`-addplaylist <название>`."
+            )
+        return
+
+    lines = []
+    for i, p in enumerate(results, start=1):
+        n = len(p.get("tracks", []))
+        dur = sum(t.get("duration", 0) for t in p.get("tracks", []))
+        author = p.get("author_name", "?")
+        lines.append(
+            f"`{i:2d}.` **{p['name']}** — {n} трек(ов), "
+            f"`{_fmt_duration(dur)}` — от *{author}*"
+        )
+
+    if query:
+        header = f"🔎 По запросу **{query}** найдено: **{total}**"
+    else:
+        header = f"📃 Все плейлисты (**{total}**):"
+
+    text = header + "\n" + "\n".join(lines)
+    if total > len(results):
+        text += f"\n_…и ещё {total - len(results)}._"
+
+    await ctx.send(text)
 
 
 @bot.command()
