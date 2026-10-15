@@ -10,6 +10,8 @@ import discord
 from discord.ext import commands
 from dotenv import load_dotenv
 
+from help import MusicHelp
+
 from system import (
     random_greeting,
     connect_to_voice,
@@ -52,7 +54,11 @@ load_dotenv()
 token = os.getenv("BOT_TOKEN")
 
 intents = discord.Intents.all()
-bot = commands.Bot(command_prefix="-", intents=intents)
+bot = commands.Bot(
+    command_prefix="-",
+    intents=intents,
+    help_command=MusicHelp(),
+)
 
 
 # events
@@ -718,3 +724,6 @@ async def nowplaying(ctx):
         return
 
     await repost_np(ctx, voice)
+
+
+bot.run(token)
