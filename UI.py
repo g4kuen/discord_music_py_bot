@@ -15,6 +15,7 @@ from system import (
     set_volume,
     DEFAULT_VOLUME,
     MAX_VOLUME,
+    cancel_prefetch,
 )
 
 
@@ -234,6 +235,7 @@ class PlayerControls(discord.ui.View):
         await interaction.response.send_message(
             f"🔁 Повтор: **{state}**", ephemeral=True
         )
+
     @discord.ui.button(emoji="⏭", label="Скип", style=discord.ButtonStyle.danger, row=1)
     async def skip_btn(self, interaction, button):
         if not await self._guard(interaction):
@@ -241,12 +243,10 @@ class PlayerControls(discord.ui.View):
 
         v = self.voice
         ch = v.channel.id
-
-        # снимаем lock — иначе play_next вернётся к истории (loop)
         locked_tracks[ch] = False
+        cancel_prefetch(v)  # ← новое
 
         if v.is_playing() or v.is_paused():
-            # stop() → after_play → play_next → следующий трек
             v.stop()
             await interaction.response.send_message("⏭️ Скип.", ephemeral=True)
         else:

@@ -78,10 +78,15 @@ def save(name: str, tracks: list, author_id: int, author_name: str):
     if not safe:
         return False, False
 
-    cleaned = [
-        {"title": t["title"], "duration": int(t.get("duration", 0) or 0)}
-        for t in tracks if t.get("title")
-    ]
+    cleaned = []
+    for t in tracks:
+        if not t.get("title"):
+            continue
+        cleaned.append({
+            "title": t["title"],
+            "duration": int(t.get("duration", 0) or 0),
+            "query": t.get("query") or t["title"],
+        })
     if not cleaned:
         return False, False
 
@@ -186,6 +191,10 @@ def delete(name: str, author_id: int) -> bool:
 def to_tracks(playlist: dict) -> list:
     """Плейлист → список треков для очереди."""
     return [
-        {"title": t["title"], "duration": t.get("duration", 0)}
+        {
+            "title": t["title"],
+            "duration": t.get("duration", 0),
+            "query": t.get("query") or t["title"],
+        }
         for t in playlist.get("tracks", [])
     ]

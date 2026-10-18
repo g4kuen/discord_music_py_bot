@@ -47,6 +47,7 @@ from system import (
     _progress_bar,
     _parse_time,
     repost_np,
+    cancel_prefetch,
 
 )
 
@@ -105,7 +106,13 @@ async def list(ctx, *, query):
         return
 
     channel_id = ctx.author.voice.channel.id
-    add_to_queue(channel_id, track['title'], track['path'],track.get('duration', 0))
+    add_to_queue(
+        channel_id,
+        track['title'],
+        track['path'],
+        track.get('duration', 0),
+        query=query,
+    )
     dur = _fmt_duration(track.get('duration'))
     await ctx.send(f"✅ Добавлено в очередь: {track['title']} `{dur}`")
 
@@ -128,7 +135,13 @@ async def play(ctx, *, query: str = None):
             return
 
         channel_id = ctx.author.voice.channel.id
-        add_to_queue(channel_id, track['title'], track['path'],track.get('duration', 0))
+        add_to_queue(
+            channel_id,
+            track['title'],
+            track['path'],
+            track.get('duration', 0),
+            query=query,
+        )
         dur = _fmt_duration(track.get('duration'))
         await ctx.send(f"✅ Добавлено в очередь: {track['title']} `{dur}`")
 
@@ -157,11 +170,12 @@ async def play(ctx, *, query: str = None):
 
 @bot.command()
 async def skip(ctx):
-    """Скипнуть/анлокнуть текущий трек """
+    """Скипнуть/анлокнуть текущий трек"""
     voice = ctx.voice_client
     if voice and voice.is_playing():
         channel_id = voice.channel.id
         locked_tracks[channel_id] = False
+        cancel_prefetch(voice)          # ← новое
         voice.stop()
         await ctx.send("⏭️ Пропускаем песню!")
     else:
@@ -355,39 +369,28 @@ async def playlist(ctx, *, name: str):
         f"⏳ Загружаю **{pl_data['name']}** ({len(tracks)} трек(ов))..."
     )
 
-    # скачиваем и добавляем в очередь
-    added = []
-    for t in tracks:
-        result = await asyncio.to_thread(download_audio, t["title"])
-        if not result or not result.get("path"):
-            print(f"❌ playlist: не удалось скачать {t['title']}")
-            continue
-        add_to_queue(
-            channel_id,
-            result["title"],
-            result["path"],
-            result.get("duration", 0),
-        )
-        added.append(result)
+    # 1. Качаем первый трек прямо сейчас
+    first = tracks[0]
+    first_search = first.get("query") or first["title"]
+    first_result = await asyncio.to_thread(download_audio, first_search)
 
-    if not added:
-        await ctx.send(f"❌ Не удалось загрузить ни одного трека из **{pl_data['name']}**.")
+    if not first_result or not first_result.get("path"):
+        await ctx.send(
+            f"❌ Не удалось скачать первый трек **{first['title']}**. "
+            f"Плейлист не загружен."
+        )
         return
 
-    total = sum(r.get("duration", 0) for r in added)
-    preview = "\n".join(
-        f"`{i:2d}.` {r['title']} `{_fmt_duration(r.get('duration'))}`"
-        for i, r in enumerate(added[:10], start=1)
-    )
-    if len(added) > 10:
-        preview += f"\n_…и ещё {len(added) - 10}._"
-
-    await ctx.send(
-        f"📥 Загружено **{len(added)}** трек(ов) из **{pl_data['name']}**, "
-        f"`{_fmt_duration(total)}`:\n{preview}"
+    # 2. Первый — в очередь с путём (готов к игре)
+    add_to_queue(
+        channel_id,
+        first_result["title"],
+        first_result["path"],
+        first_result.get("duration", 0),
+        query=first_search,
     )
 
-    # запускаем, если ничего не играет
+    # 3. Запускаем сразу — очередь пока пуста, но play_next заберёт первый
     voice = await connect_to_voice(ctx)
     if voice is None:
         return
@@ -404,7 +407,31 @@ async def playlist(ctx, *, name: str):
     else:
         await ctx.send("🎵 Музыка уже играет, плейлист добавлен в очередь.")
 
-@bot.command(name="addplaylist", aliases=["ap", "plsave"])
+    # 4. Остальные — в очередь без пути (докачаются в play_next)
+    for t in tracks[1:]:
+        add_to_queue(
+            channel_id,
+            t["title"],
+            "",
+            t.get("duration", 0),
+            query=t.get("query") or t["title"],
+        )
+
+    # 5. Превью
+    total = sum(t.get("duration", 0) for t in tracks)
+    preview = "\n".join(
+        f"`{i:2d}.` {t['title']} `{_fmt_duration(t.get('duration'))}`"
+        for i, t in enumerate(tracks[:10], start=1)
+    )
+    if len(tracks) > 10:
+        preview += f"\n_…и ещё {len(tracks) - 10}._"
+
+    await ctx.send(
+        f"📥 Загружено **{len(tracks)}** трек(ов) из **{pl_data['name']}**, "
+        f"`{_fmt_duration(total)}`:\n{preview}"
+    )
+
+
 async def addplaylist(ctx, *, name: str):
     """Сохранить текущую очередь (+ играющий трек) как плейлист.
     Использование: -addplaylist <название>"""
@@ -422,12 +449,14 @@ async def addplaylist(ctx, *, name: str):
         tracks.append({
             "title": current["title"],
             "duration": current.get("duration", 0),
+            "query": current.get("query") or current["title"],   # ← новое
         })
     for t in queue:
         if t.get("title"):
             tracks.append({
                 "title": t["title"],
                 "duration": t.get("duration", 0),
+                "query": t.get("query") or t["title"],           # ← новое
             })
 
     if not tracks:
@@ -445,7 +474,6 @@ async def addplaylist(ctx, *, name: str):
         f"{prefix} плейлист **{name}** — {len(tracks)} трек(ов), "
         f"`{_fmt_duration(total)}`"
     )
-
 
 @bot.command(name="showplaylist", aliases=["sp", "pls"])
 async def showplaylist(ctx, *, query: str = None):

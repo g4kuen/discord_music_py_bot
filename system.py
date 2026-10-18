@@ -181,7 +181,7 @@ async def play_next(ctx, bot, channel_id, depth=0):
         if not track or not track.get('path'):
             await ctx.send("⚠️ Не удалось перемотать трек.")
             return
-        song = None  # не используется в seek-ветке
+        song = None
     # ──────────────────────────────────────────────────────────
     elif locked_tracks.get(channel_id):
         if history:
@@ -199,12 +199,25 @@ async def play_next(ctx, bot, channel_id, depth=0):
         song = queues[channel_id].pop(0)
 
     # в обычном режиме трек качаем, в seek — уже есть
+    search_term = None
     if not is_seek:
-        track = await asyncio.to_thread(download_audio, song['title'])
-        if not track or not track.get('path'):
-            await ctx.send(f"❌ Не удалось скачать аудио для {song['title']}")
-            await play_next(ctx, bot, channel_id, depth + 1)
-            return
+        # трек уже скачан prefetch'ем? используем готовый файл
+        if song.get('url') and os.path.exists(song['url']):
+            track = {
+                'title': song['title'],
+                'path': song['url'],
+                'duration': song.get('duration', 0),
+                'id': song.get('video_id'),
+                'query': song.get('query') or song['title'],
+            }
+            search_term = track['query']
+        else:
+            search_term = song.get('query') or song['title']
+            track = await asyncio.to_thread(download_audio, search_term)
+            if not track or not track.get('path'):
+                await ctx.send(f"❌ Не удалось скачать аудио для {song['title']}")
+                await play_next(ctx, bot, channel_id, depth + 1)
+                return
 
     # источник: с -ss при seek, обычный иначе
     if is_seek:
@@ -219,6 +232,11 @@ async def play_next(ctx, bot, channel_id, depth=0):
     source = discord.PCMVolumeTransformer(raw, volume=get_volume(channel_id))
 
     voice.current = track
+    if not is_seek and search_term:
+        track['query'] = search_term
+    elif not is_seek:
+        track.setdefault('query', track['title'])
+
     # в историю не пишем при seek — иначе трек задвоится
     if not is_seek and not locked_tracks.get(channel_id):
         add_to_history(track)
@@ -238,19 +256,87 @@ async def play_next(ctx, bot, channel_id, depth=0):
         else:
             # новый трек — новое сообщение + новый цикл
             await start_np(ctx, voice, track)
+
+            # ── prefetch следующего трека (не блокирует) ──
+            if not locked_tracks.get(channel_id):
+                voice._prefetch_task = asyncio.create_task(prefetch_next(channel_id))
+
     except Exception as e:
         print(f"Ошибка запуска ffmpeg: {e}")
         await ctx.send(f"❌ Ошибка при воспроизведении: {track['title']}")
         await play_next(ctx, bot, channel_id, depth + 1)
 
+
+async def prefetch_next(channel_id, depth=0):
+    """Фоново качает следующий трек из очереди, чтобы play_next не ждал.
+    Обновляет queue[0]['url'], если трек успешно скачан."""
+    if depth > 2:
+        return  # не уходим в бесконечную рекурсию
+
+    queue = queues.get(channel_id, [])
+    if not queue:
+        return
+
+    # уже скачан? ничего не делаем
+    next_song = queue[0]
+    if next_song.get('url') and os.path.exists(next_song['url']):
+        return
+
+    # приоритет: video_id → query → title
+    search_term = (
+        next_song.get('video_id')
+        or next_song.get('query')
+        or next_song['title']
+    )
+
+    try:
+        track = await asyncio.to_thread(download_audio, search_term)
+    except Exception as e:
+        print(f"⚠️ prefetch: ошибка скачивания {search_term}: {e}")
+        return
+
+    if not track or not track.get('path'):
+        print(f"⚠️ prefetch: не удалось скачать {search_term}")
+        return
+
+    # проверяем, что очередь не изменилась за время скачивания
+    queue = queues.get(channel_id, [])
+    if not queue:
+        # очередь опустела — файл скачан, но уже не нужен. Оставляем в /tmp,
+        # download_audio вернёт его из истории, если трек снова добавят.
+        return
+
+    # обновляем ПЕРВЫЙ трек в очереди (тот, что мы качали)
+    # но только если он всё ещё тот же (по title)
+    if queue[0].get('title') == next_song.get('title'):
+        queue[0]['url'] = track['path']
+        if not queue[0].get('video_id'):
+            queue[0]['video_id'] = track.get('id')
+        if not queue[0].get('duration'):
+            queue[0]['duration'] = track.get('duration', 0)
+        print(f"✅ prefetch: готов {track['title']}")
+
+
+def cancel_prefetch(voice):
+    """Отменяет фоновую задачу prefetch, если она ещё жива."""
+    task = getattr(voice, '_prefetch_task', None)
+    if task and not task.done():
+        task.cancel()
+    voice._prefetch_task = None
+
 def random_greeting():
     return f"{random.choice(greetings)} {random.choice(hates)} {random.choice(emojis)}"
 
 
-def add_to_queue(channel_id, title, url, duration):
+def add_to_queue(channel_id, title, url, duration, query=None):
     if channel_id not in queues:
         queues[channel_id] = []
-    queues[channel_id].append({'title': title, 'url': url, 'duration': duration})
+    queues[channel_id].append({
+        'title': title,
+        'url': url,
+        'duration': duration,
+        'query': query or title,
+    })
 
 
 def get_queue(channel_id):
