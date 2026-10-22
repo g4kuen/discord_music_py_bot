@@ -193,7 +193,7 @@ async def play_next(ctx, bot, channel_id, depth=0):
         if not queues.get(channel_id):
             await ctx.send("Очередь закончилась!")
             if voice:
-                await stop_np(voice)
+                await stop_np(voice, delete_message=True)
                 await voice.disconnect()
             return
         song = queues[channel_id].pop(0)
@@ -653,8 +653,9 @@ async def start_np(ctx, voice, track):
 
 
 
-async def stop_np(voice):
-    """Отменяет авто-обновление и забывает сообщение."""
+async def stop_np(voice, delete_message=False):
+    """Отменяет авто-обновление и забывает сообщение.
+    Если delete_message=True — физически удаляет NP-сообщение."""
     task = getattr(voice, 'np_task', None)
     if task and not task.done():
         task.cancel()
@@ -663,6 +664,14 @@ async def stop_np(voice):
         except (asyncio.CancelledError, Exception):
             pass
     voice.np_task = None
+
+    msg = getattr(voice, 'np_message', None)
+    if delete_message and msg:
+        try:
+            await msg.delete()
+        except Exception:
+            pass
+
     voice.np_message = None
     voice._np_last_text = None
 

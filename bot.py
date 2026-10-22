@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 
 from help import MusicHelp
 import playlists as pl
-
+from UI import PlaylistEditorView, PlaylistPickerView
 from system import (
     random_greeting,
     connect_to_voice,
@@ -68,7 +68,7 @@ bot = commands.Bot(
 async def on_ready():
     print(f"✅ Бот {bot.user} успешно запущен!")
     cleanup_temp_files()
-    print("🧹 Кэш /tmp очищен")
+    print("🧹 Кэш /tmp / очищен")
 
 
 # commands
@@ -432,8 +432,10 @@ async def playlist(ctx, *, name: str):
     )
 
 
+@bot.command(name="addplaylist", aliases=["ap", "plsave"])
 async def addplaylist(ctx, *, name: str):
-    """Сохранить текущую очередь (+ играющий трек) как плейлист.
+    """Дополнить плейлист текущей очередью (+ играющий трек).
+    Если плейлиста нет — создаст новый.
     Использование: -addplaylist <название>"""
     if ctx.author.voice is None:
         await ctx.send("Ты должен быть в голосовом канале!")
@@ -449,31 +451,51 @@ async def addplaylist(ctx, *, name: str):
         tracks.append({
             "title": current["title"],
             "duration": current.get("duration", 0),
-            "query": current.get("query") or current["title"],   # ← новое
+            "query": current.get("query") or current["title"],
+            "video_id": current.get("video_id") or current.get("id"),
         })
     for t in queue:
         if t.get("title"):
             tracks.append({
                 "title": t["title"],
                 "duration": t.get("duration", 0),
-                "query": t.get("query") or t["title"],           # ← новое
+                "query": t.get("query") or t["title"],
+                "video_id": t.get("video_id"),
             })
 
     if not tracks:
         await ctx.send("❌ Нечего сохранять — очередь пуста и ничего не играет.")
         return
 
-    ok, was_update = pl.save(name, tracks, ctx.author.id, str(ctx.author))
+    # проверка прав: если плейлист существует и он чужой — только админ
+    is_admin = ctx.author.guild_permissions.manage_guild
+    existing = pl.load(name)
+    if existing and existing.get("author_id") != ctx.author.id and not is_admin:
+        await ctx.send(
+            f"❌ Плейлист **{name}** принадлежит другому пользователю. "
+            f"Только админ может его дополнить."
+        )
+        return
+
+    ok, created, total, added = pl.append(
+        name, tracks, ctx.author.id, str(ctx.author), is_admin=is_admin
+    )
     if not ok:
         await ctx.send(f"❌ Не удалось сохранить **{name}** (проверь имя).")
         return
 
-    total = sum(t["duration"] for t in tracks)
-    prefix = "♻️ Перезаписан" if was_update else "💾 Сохранён"
-    await ctx.send(
-        f"{prefix} плейлист **{name}** — {len(tracks)} трек(ов), "
-        f"`{_fmt_duration(total)}`"
-    )
+    if created:
+        await ctx.send(f"💾 Создан плейлист **{name}** — {total} трек(ов).")
+    elif added == 0:
+        await ctx.send(
+            f"ℹ️ Плейлист **{name}** уже содержит все эти треки. "
+            f"Всего: **{total}**."
+        )
+    else:
+        await ctx.send(
+            f"➕ Плейлист **{name}** дополнен на **{added}** трек(ов). "
+            f"Всего: **{total}**."
+        )
 
 @bot.command(name="showplaylist", aliases=["sp", "pls"])
 async def showplaylist(ctx, *, query: str = None):
@@ -883,6 +905,93 @@ async def nowplaying(ctx):
         return
 
     await repost_np(ctx, voice)
+
+
+@bot.command(name="editplaylist", aliases=["epl"])
+async def editplaylist(ctx, *, name: str = None):
+    """Редактор плейлистов.
+    -editplaylist — список твоих (или всех, если админ)
+    -editplaylist <name> — сразу открыть"""
+
+
+    is_admin = ctx.author.guild_permissions.manage_guild
+
+    if name:
+        # сразу открываем конкретный
+        pl_data = pl.load(name)
+        if not pl_data:
+            await ctx.send(f"❌ Плейлист **{name}** не найден.")
+            return
+        if pl_data.get("author_id") != ctx.author.id and not is_admin:
+            await ctx.send("❌ Только автор или админ сервера.")
+            return
+        await _send_editor(ctx, pl_data, ctx.author.id, is_admin)
+        return
+
+    # без аргумента — список
+    if is_admin:
+        playlists, _ = pl.search("", limit=25)
+        header = f"✏️ Все плейлисты (**{len(playlists)}**):"
+    else:
+        playlists = pl.list_by_author(ctx.author.id)
+        header = f"✏️ Твои плейлисты (**{len(playlists)}**):"
+
+    if not playlists:
+        await ctx.send(
+            "📭 Плейлистов нет. Сохрани первый: `-addplaylist <название>`."
+        )
+        return
+
+    async def on_pick(interaction, chosen):
+        await interaction.response.defer()
+        await _send_editor(ctx, chosen, ctx.author.id, is_admin)
+
+    view = PlaylistPickerView(playlists, ctx.author.id, is_admin, on_pick)
+    await ctx.send(f"{header}\n_Выбери для редактирования._", view=view)
+
+
+async def _send_editor(ctx, playlist, author_id, is_admin, selected_index=None):
+
+    async def refresh_cb(interaction, pl_data, sel_idx):
+        """Пересоздаёт View и обновляет сообщение."""
+        new_view = PlaylistEditorView(
+            pl_data,
+            pl_data["author_id"],
+            refresh_cb,
+            selected_index=sel_idx,
+        )
+        new_text = _format_playlist(pl_data)
+        try:
+            await interaction.message.edit(content=new_text, view=new_view)
+        except Exception as e:
+            print(f"⚠️ refresh_cb: {e}")
+
+    view = PlaylistEditorView(
+        playlist,
+        playlist["author_id"],
+        refresh_cb,
+        selected_index=selected_index,
+    )
+    text = _format_playlist(playlist)
+    await ctx.send(text, view=view)
+
+
+def _format_playlist(playlist) -> str:
+    tracks = playlist.get("tracks", [])
+    total = sum(t.get("duration", 0) for t in tracks)
+    preview = "\n".join(
+        f"`{i:2d}.` {t['title']} `{_fmt_duration(t.get('duration'))}`"
+        for i, t in enumerate(tracks[:15], start=1)
+    )
+    if len(tracks) > 15:
+        preview += f"\n_…и ещё {len(tracks) - 15}._"
+    if not preview:
+        preview = "_пусто_"
+
+    return (
+        f"✏️ **{playlist['name']}** — {len(tracks)} трек(ов), "
+        f"`{_fmt_duration(total)}`\n{preview}"
+    )
 
 
 bot.run(token)
